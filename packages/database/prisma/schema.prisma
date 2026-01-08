@@ -1,0 +1,912 @@
+// schema.prisma
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [postgis, pgvector, uuid_ossp(map: "uuid-ossp")]
+}
+
+// ============ ORGANIZATION & AUTH ============
+
+model Organization {
+  id       String  @id @default(cuid())
+  name     String
+  type     OrgType @default(OPERATOR)
+  parentId String? // For franchise hierarchy
+
+  parent   Organization?  @relation("FranchiseHierarchy", fields: [parentId], references: [id])
+  children Organization[] @relation("FranchiseHierarchy")
+
+  users          User[]
+  lots           Lot[]
+  builds         Build[]
+  subcontractors Subcontractor[]
+  suppliers      Supplier[]
+
+  settings  Json     @default("{}")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+enum OrgType {
+  HQ
+  OPERATOR
+}
+
+model User {
+  id             String   @id @default(cuid())
+  clerkId        String   @unique
+  email          String   @unique
+  name           String
+  role           UserRole
+  organizationId String
+
+  organization Organization   @relation(fields: [organizationId], references: [id])
+  timeEntries  TimeEntry[]
+  activities   ActivityLog[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+enum UserRole {
+  OWNER
+  OPERATOR
+  ADMIN
+  VIEWER
+}
+
+// ============ LAND SOURCING ============
+
+model Lot {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+
+  // Location
+  address   String
+  city      String
+  county    String
+  state     String @default("GA")
+  zip       String
+  latitude  Float
+  longitude Float
+
+  // Property Details
+  parcelId         String? // County parcel ID
+  acreage          Float
+  zoning           String?
+  zoningCompatible Boolean @default(false)
+  utilities        Json    @default("{}") // {water: bool, sewer: bool, electric: bool, gas: bool}
+  topography       String? // FLAT, GENTLE_SLOPE, STEEP, etc.
+
+  // Sourcing
+  source           LotSource
+  sourceId         String? // MLS ID, wholesaler deal ID, etc.
+  listPrice        Float?
+  estimatedValue   Float? // Our ARV estimate
+  daysOnMarket     Int?
+  sellerMotivation Float? // 0-1 score
+
+  // Scoring
+  schoolRating   Float? // 1-10
+  compScore      Float? // Based on nearby sales
+  marginEstimate Float? // Projected gross margin
+  overallScore   Float? // Composite weighted score
+  scoreBreakdown Json   @default("{}")
+
+  // Status
+  status LotStatus @default(NEW)
+
+  // Relationships
+  build       Build?
+  contacts    LotContact[]
+  notes       LotNote[]
+  comparables Comparable[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([organizationId, status])
+  @@index([overallScore(sort: Desc)])
+}
+
+enum LotSource {
+  MLS
+  WHOLESALER
+  DIRECT_MAIL
+  DRIVING_FOR_DOLLARS
+  REFERRAL
+  OFF_MARKET
+  TAX_DELINQUENT
+  PROBATE
+  FSBO
+}
+
+enum LotStatus {
+  NEW
+  REVIEWING
+  CONTACTED
+  NEGOTIATING
+  UNDER_CONTRACT
+  DUE_DILIGENCE
+  PURCHASED
+  PASSED
+  LOST
+}
+
+model LotContact {
+  id    String @id @default(cuid())
+  lotId String
+  lot   Lot    @relation(fields: [lotId], references: [id], onDelete: Cascade)
+
+  type      ContactType
+  direction Direction
+  channel   Channel
+  content   String?
+  response  String?
+
+  sentAt      DateTime  @default(now())
+  respondedAt DateTime?
+}
+
+enum ContactType {
+  INITIAL_OUTREACH
+  FOLLOW_UP
+  OFFER
+  NEGOTIATION
+  CLOSING
+}
+
+enum Direction {
+  OUTBOUND
+  INBOUND
+}
+
+enum Channel {
+  EMAIL
+  SMS
+  PHONE
+  MAIL
+  IN_PERSON
+}
+
+model LotNote {
+  id      String @id @default(cuid())
+  lotId   String
+  lot     Lot    @relation(fields: [lotId], references: [id], onDelete: Cascade)
+  userId  String
+  content String
+
+  createdAt DateTime @default(now())
+}
+
+model Comparable {
+  id    String @id @default(cuid())
+  lotId String
+  lot   Lot    @relation(fields: [lotId], references: [id], onDelete: Cascade)
+
+  address     String
+  salePrice   Float
+  saleDate    DateTime
+  sqft        Int
+  beds        Int
+  baths       Float
+  yearBuilt   Int
+  distance    Float // miles from subject lot
+  pricePerSqft Float
+
+  createdAt DateTime @default(now())
+}
+
+// ============ BUILD MANAGEMENT ============
+
+model Build {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+
+  // Property
+  lotId       String     @unique
+  lot         Lot        @relation(fields: [lotId], references: [id])
+  floorPlanId String?
+  floorPlan   FloorPlan? @relation(fields: [floorPlanId], references: [id])
+
+  // Financials
+  landCost           Float
+  budgetHard         Float // Hard costs budget
+  budgetSoft         Float // Soft costs budget
+  budgetTotal        Float // Total budget
+  actualHard         Float  @default(0)
+  actualSoft         Float  @default(0)
+  contractPrice      Float? // If pre-sold
+  projectedSalePrice Float?
+
+  // Timeline
+  status            BuildStatus @default(PRE_CONSTRUCTION)
+  permitSubmitted   DateTime?
+  permitApproved    DateTime?
+  startDate         DateTime?
+  estimatedComplete DateTime?
+  actualComplete    DateTime?
+  closingDate       DateTime?
+
+  // Relationships
+  tasks          BuildTask[]
+  schedules      ScheduleEntry[]
+  draws          Draw[]
+  inspections    Inspection[]
+  purchaseOrders PurchaseOrder[]
+  photos         BuildPhoto[]
+  changeOrders   ChangeOrder[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([organizationId, status])
+}
+
+enum BuildStatus {
+  PRE_CONSTRUCTION
+  PERMITTING
+  SITE_WORK
+  FOUNDATION
+  FRAMING
+  ROUGH_INS
+  INSULATION_DRYWALL
+  FINISHES
+  FINAL
+  PUNCH_LIST
+  COMPLETE
+  SOLD
+}
+
+model FloorPlan {
+  id      String @id @default(cuid())
+  name    String
+  sqft    Int
+  beds    Int
+  baths   Float
+  stories Int    @default(1)
+  garage  Int    @default(2) // car count
+
+  // Cost estimates
+  baseCost Float // Base construction cost
+
+  // Documents
+  blueprintUrl String?
+
+  builds Build[]
+  tasks  FloorPlanTask[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model FloorPlanTask {
+  id          String    @id @default(cuid())
+  floorPlanId String
+  floorPlan   FloorPlan @relation(fields: [floorPlanId], references: [id])
+
+  name         String
+  phase        BuildStatus
+  trade        Trade
+  duration     Int // days
+  dependencies String[] // task IDs that must complete first
+  order        Int
+
+  createdAt DateTime @default(now())
+}
+
+model BuildTask {
+  id      String @id @default(cuid())
+  buildId String
+  build   Build  @relation(fields: [buildId], references: [id], onDelete: Cascade)
+
+  name  String
+  phase BuildStatus
+  trade Trade
+
+  // Scheduling
+  scheduledStart DateTime?
+  scheduledEnd   DateTime?
+  actualStart    DateTime?
+  actualEnd      DateTime?
+  duration       Int // planned days
+
+  // Assignment
+  subcontractorId String?
+  subcontractor   Subcontractor? @relation(fields: [subcontractorId], references: [id])
+
+  // Status
+  status       TaskStatus @default(NOT_STARTED)
+  dependencies String[]
+  blockedBy    String[] // task IDs currently blocking this
+
+  // Cost
+  budgetAmount Float?
+  actualAmount Float?
+
+  notes String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([buildId, status])
+  @@index([subcontractorId])
+}
+
+enum TaskStatus {
+  NOT_STARTED
+  SCHEDULED
+  IN_PROGRESS
+  BLOCKED
+  COMPLETE
+  SKIPPED
+}
+
+enum Trade {
+  GENERAL
+  EXCAVATION
+  CONCRETE
+  FRAMING
+  ROOFING
+  PLUMBING
+  ELECTRICAL
+  HVAC
+  INSULATION
+  DRYWALL
+  PAINT
+  FLOORING
+  CABINETS
+  COUNTERTOPS
+  TILE
+  TRIM
+  LANDSCAPING
+  CLEANING
+  OTHER
+}
+
+// ============ SUBCONTRACTOR MANAGEMENT ============
+
+model Subcontractor {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+
+  // Basic Info
+  companyName String
+  contactName String
+  phone       String
+  email       String?
+  address     String?
+
+  // Trade & Capacity
+  trades        Trade[]
+  crewSize      Int?
+  maxConcurrent Int     @default(1) // max concurrent jobs
+  serviceRadius Int? // miles
+
+  // Verification
+  licenseNumber   String?
+  licenseExpiry   DateTime?
+  insuranceExpiry DateTime?
+  insuranceAmount Float?
+  w9OnFile        Boolean  @default(false)
+
+  // Reliability Metrics (calculated)
+  reliabilityScore Float @default(0.5) // 0-1
+  onTimeRate       Float @default(0.5) // 0-1
+  qualityRating    Float @default(0.5) // 0-1
+  responseRate     Float @default(0.5) // 0-1
+  totalJobs        Int   @default(0)
+  completedJobs    Int   @default(0)
+
+  // Pricing
+  pricingTier PricingTier @default(MARKET)
+  rateHistory Json        @default("[]") // [{date, trade, rate}]
+
+  // Status
+  status           SubStatus     @default(PROSPECT)
+  preferredPayment PaymentMethod @default(CHECK)
+  paymentTerms     Int           @default(7) // days after completion
+
+  // Relationships
+  tasks           BuildTask[]
+  scheduleEntries ScheduleEntry[]
+  communications  SubCommunication[]
+  ratings         SubRating[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([organizationId, status])
+  @@index([reliabilityScore(sort: Desc)])
+}
+
+enum SubStatus {
+  PROSPECT
+  VETTING
+  APPROVED
+  PREFERRED
+  PROBATION
+  BLACKLISTED
+}
+
+enum PricingTier {
+  BUDGET
+  MARKET
+  PREMIUM
+}
+
+enum PaymentMethod {
+  CHECK
+  ACH
+  ZELLE
+  VENMO
+}
+
+model SubCommunication {
+  id              String        @id @default(cuid())
+  subcontractorId String
+  subcontractor   Subcontractor @relation(fields: [subcontractorId], references: [id], onDelete: Cascade)
+
+  type      CommType
+  channel   Channel
+  direction Direction
+  content   String
+  response  String?
+
+  // For confirmations
+  buildId      String?
+  taskId       String?
+  scheduledFor DateTime?
+  confirmedAt  DateTime?
+
+  sentAt      DateTime  @default(now())
+  respondedAt DateTime?
+
+  @@index([subcontractorId, type])
+}
+
+enum CommType {
+  CONFIRMATION_48H
+  CONFIRMATION_24H
+  CONFIRMATION_2H
+  REMINDER
+  DELAY_NOTIFICATION
+  RESCHEDULE
+  COMPLETION_REQUEST
+  PHOTO_REQUEST
+  GENERAL
+}
+
+model SubRating {
+  id              String        @id @default(cuid())
+  subcontractorId String
+  subcontractor   Subcontractor @relation(fields: [subcontractorId], references: [id], onDelete: Cascade)
+  buildId         String
+  taskId          String
+
+  arrivedOnTime      Boolean
+  completedOnTime    Boolean
+  qualityScore       Int // 1-5
+  communicationScore Int // 1-5
+  cleanupScore       Int // 1-5
+  wouldRehire        Boolean
+
+  notes String?
+
+  createdAt DateTime @default(now())
+}
+
+model ScheduleEntry {
+  id              String         @id @default(cuid())
+  buildId         String
+  build           Build          @relation(fields: [buildId], references: [id], onDelete: Cascade)
+  subcontractorId String?
+  subcontractor   Subcontractor? @relation(fields: [subcontractorId], references: [id])
+
+  taskId            String?
+  trade             Trade
+  description       String
+  scheduledDate     DateTime
+  scheduledTime     String? // "8:00 AM"
+  estimatedDuration Int // hours
+
+  status       ScheduleStatus @default(SCHEDULED)
+  confirmedAt  DateTime?
+  arrivedAt    DateTime?
+  completedAt  DateTime?
+  weatherDelay Boolean        @default(false)
+  notes        String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([buildId, scheduledDate])
+  @@index([subcontractorId, scheduledDate])
+}
+
+enum ScheduleStatus {
+  SCHEDULED
+  CONFIRMED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+  NO_SHOW
+  RESCHEDULED
+}
+
+// ============ INSPECTIONS ============
+
+model Inspection {
+  id      String @id @default(cuid())
+  buildId String
+  build   Build  @relation(fields: [buildId], references: [id], onDelete: Cascade)
+
+  type         InspectionType
+  jurisdiction String
+
+  // Scheduling
+  scheduledDate DateTime?
+  scheduledTime String?
+  inspectorId   String?
+  inspector     Inspector? @relation(fields: [inspectorId], references: [id])
+
+  // Results
+  status         InspectionStatus  @default(NOT_SCHEDULED)
+  result         InspectionResult?
+  passedAt       DateTime?
+  failedItems    Json              @default("[]")
+  notes          String?
+
+  // Pre-inspection
+  checklistId    String?
+  checklist      InspectionChecklist? @relation(fields: [checklistId], references: [id])
+  preAuditScore  Float?
+  preAuditIssues Json                 @default("[]")
+
+  // Photos
+  photos InspectionPhoto[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([buildId, type])
+}
+
+enum InspectionType {
+  FOOTING
+  FOUNDATION
+  SLAB
+  FRAMING
+  ROUGH_ELECTRICAL
+  ROUGH_PLUMBING
+  ROUGH_HVAC
+  INSULATION
+  DRYWALL
+  FINAL_ELECTRICAL
+  FINAL_PLUMBING
+  FINAL_HVAC
+  FINAL_BUILDING
+  CERTIFICATE_OF_OCCUPANCY
+}
+
+enum InspectionStatus {
+  NOT_SCHEDULED
+  SCHEDULED
+  READY
+  IN_PROGRESS
+  PASSED
+  FAILED
+  PARTIAL
+  RESCHEDULED
+}
+
+enum InspectionResult {
+  PASS
+  FAIL
+  PARTIAL
+  CORRECTION_REQUIRED
+}
+
+model Inspector {
+  id           String  @id @default(cuid())
+  name         String
+  jurisdiction String
+  phone        String?
+  email        String?
+
+  // Intelligence
+  preferences     Json @default("{}") // {prefers_morning: true, strict_on_nailplates: true}
+  commonCallouts  Json @default("[]")
+  avgResponseTime Int? // minutes
+
+  inspections Inspection[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model InspectionChecklist {
+  id           String         @id @default(cuid())
+  jurisdiction String
+  type         InspectionType
+  version      Int            @default(1)
+
+  items Json // [{id, description, required, common_fail_reason}]
+
+  inspections Inspection[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([jurisdiction, type, version])
+}
+
+model InspectionPhoto {
+  id           String     @id @default(cuid())
+  inspectionId String
+  inspection   Inspection @relation(fields: [inspectionId], references: [id], onDelete: Cascade)
+
+  url             String
+  category        String // e.g., "nail_plates", "outlet_spacing"
+  checklistItemId String?
+
+  // AI Analysis
+  analyzed       Boolean @default(false)
+  analysisResult Json? // {issues: [], confidence: 0.95}
+  flagged        Boolean @default(false)
+  flagReason     String?
+
+  capturedAt DateTime @default(now())
+}
+
+// ============ PROCUREMENT ============
+
+model Supplier {
+  id             String           @id @default(cuid())
+  organizationId String
+  organization   Organization     @relation(fields: [organizationId], references: [id])
+  name           String
+  category       SupplierCategory
+  contactName    String?
+  phone          String?
+  email          String?
+  address        String?
+
+  // Performance
+  avgLeadTime   Int?  // days
+  onTimeRate    Float @default(0.5)
+  qualityRating Float @default(0.5)
+
+  // Terms
+  paymentTerms    Int    @default(30) // net days
+  creditLimit     Float?
+  volumeDiscounts Json   @default("[]") // [{threshold, discount_pct}]
+
+  isBackup Boolean @default(false)
+
+  purchaseOrders PurchaseOrder[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+enum SupplierCategory {
+  LUMBER
+  CONCRETE
+  ROOFING
+  ELECTRICAL
+  PLUMBING
+  HVAC
+  APPLIANCES
+  FIXTURES
+  FLOORING
+  PAINT
+  GENERAL
+}
+
+model PurchaseOrder {
+  id         String   @id @default(cuid())
+  buildId    String
+  build      Build    @relation(fields: [buildId], references: [id], onDelete: Cascade)
+  supplierId String
+  supplier   Supplier @relation(fields: [supplierId], references: [id])
+
+  poNumber String   @unique
+  status   POStatus @default(DRAFT)
+
+  items    Json // [{sku, description, qty, unit_price, total}]
+  subtotal Float
+  tax      Float
+  total    Float
+
+  orderedAt        DateTime?
+  expectedDelivery DateTime?
+  deliveredAt      DateTime?
+
+  notes String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+enum POStatus {
+  DRAFT
+  SUBMITTED
+  CONFIRMED
+  SHIPPED
+  DELIVERED
+  PARTIAL
+  CANCELLED
+}
+
+model MaterialPrice {
+  id       String           @id @default(cuid())
+  material String // e.g., "lumber_2x4_8ft"
+  category SupplierCategory
+  region   String           @default("atlanta")
+
+  price  Float
+  unit   String // e.g., "each", "bdft", "sqft"
+  source String // supplier name or "market"
+
+  recordedAt DateTime @default(now())
+
+  @@index([material, recordedAt])
+}
+
+// ============ FINANCIAL ============
+
+model Draw {
+  id      String @id @default(cuid())
+  buildId String
+  build   Build  @relation(fields: [buildId], references: [id], onDelete: Cascade)
+
+  drawNumber Int
+  amount     Float
+  status     DrawStatus @default(PREPARING)
+
+  // Documentation
+  invoices     Json     @default("[]") // [{vendor, amount, invoice_url}]
+  photos       String[] // URLs
+  inspectionId String?
+
+  submittedAt DateTime?
+  approvedAt  DateTime?
+  fundedAt    DateTime?
+
+  notes String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+enum DrawStatus {
+  PREPARING
+  SUBMITTED
+  UNDER_REVIEW
+  APPROVED
+  FUNDED
+  REJECTED
+}
+
+model ChangeOrder {
+  id      String @id @default(cuid())
+  buildId String
+  build   Build  @relation(fields: [buildId], references: [id], onDelete: Cascade)
+
+  coNumber    Int
+  description String
+  reason      ChangeOrderReason
+
+  amount     Float // can be negative
+  daysImpact Int   @default(0)
+
+  status      ChangeOrderStatus @default(PENDING)
+  requestedBy String // "buyer", "builder", "required"
+  approvedBy  String?
+
+  createdAt  DateTime  @default(now())
+  approvedAt DateTime?
+}
+
+enum ChangeOrderReason {
+  BUYER_REQUEST
+  SITE_CONDITION
+  CODE_REQUIREMENT
+  DESIGN_ERROR
+  MATERIAL_SUBSTITUTION
+  OTHER
+}
+
+enum ChangeOrderStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  VOIDED
+}
+
+// ============ PHOTOS & DOCUMENTATION ============
+
+model BuildPhoto {
+  id      String @id @default(cuid())
+  buildId String
+  build   Build  @relation(fields: [buildId], references: [id], onDelete: Cascade)
+
+  url         String
+  category    PhotoCategory
+  phase       BuildStatus
+  description String?
+  takenAt     DateTime      @default(now())
+  uploadedBy  String?
+
+  // AI tagging
+  aiTags String[]
+
+  createdAt DateTime @default(now())
+}
+
+enum PhotoCategory {
+  PROGRESS
+  INSPECTION
+  ISSUE
+  COMPLETION
+  MARKETING
+  DOCUMENTATION
+}
+
+// ============ TIME TRACKING & ANALYTICS ============
+
+model TimeEntry {
+  id      String  @id @default(cuid())
+  userId  String
+  user    User    @relation(fields: [userId], references: [id])
+  buildId String?
+
+  category    TimeCategory
+  subcategory String?
+
+  startTime DateTime
+  endTime   DateTime?
+  duration  Int? // minutes
+
+  description String?
+  automated   Boolean @default(false) // true if AI logged this
+
+  createdAt DateTime @default(now())
+}
+
+enum TimeCategory {
+  SUB_COORDINATION
+  PROCUREMENT
+  INSPECTIONS
+  SITE_VISITS
+  ADMIN
+  SALES
+  LAND_SOURCING
+  PLANNING
+  OTHER
+}
+
+model ActivityLog {
+  id         String @id @default(cuid())
+  userId     String?
+  user       User?  @relation(fields: [userId], references: [id])
+
+  entityType String // "lot", "build", "sub", etc.
+  entityId   String
+  action     String // "created", "updated", "status_changed"
+  changes    Json?
+
+  createdAt DateTime @default(now())
+
+  @@index([entityType, entityId])
+}
