@@ -1,10 +1,11 @@
 import { Queue, Worker, Job } from 'bullmq';
 import IORedis from 'ioredis';
 
-// Redis connection
-const connection = new IORedis(process.env.REDIS_URL || 'redis://localhost:6379', {
+// Redis connection - cast to any to resolve ioredis version mismatch between bullmq and ioredis
+const redisConnection = new IORedis(process.env.REDIS_URL || 'redis://localhost:6379', {
   maxRetriesPerRequest: null,
 });
+const connection = redisConnection as any;
 
 // Queue definitions
 export const lotQueue = new Queue('lot-jobs', { connection });

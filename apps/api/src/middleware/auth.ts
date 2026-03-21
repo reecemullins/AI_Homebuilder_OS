@@ -119,12 +119,12 @@ export async function orgContextMiddleware(
   }
 }
 
-export function requireOrg(
+export async function requireOrg(
   request: FastifyRequest,
   reply: FastifyReply
-): void {
+): Promise<void> {
   if (!request.organizationId) {
-    reply.status(403).send({
+    return reply.status(403).send({
       success: false,
       error: {
         code: 'NO_ORGANIZATION',
@@ -135,9 +135,9 @@ export function requireOrg(
 }
 
 export function requireRole(allowedRoles: string[]) {
-  return function (request: FastifyRequest, reply: FastifyReply): void {
+  return async function (request: FastifyRequest, reply: FastifyReply): Promise<void> {
     if (!request.userRole || !allowedRoles.includes(request.userRole)) {
-      reply.status(403).send({
+      return reply.status(403).send({
         success: false,
         error: {
           code: 'FORBIDDEN',
